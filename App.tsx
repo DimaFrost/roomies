@@ -9,6 +9,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import { Avatar } from "./src/components/Avatar";
 import { AsksScreen } from "./src/screens/AsksScreen";
 import { ExpensesScreen } from "./src/screens/ExpensesScreen";
+import { OnboardingScreen } from "./src/screens/OnboardingScreen";
 import { HouseholdProvider, useHousehold } from "./src/store";
 import { COLORS, FONTS } from "./src/theme";
 
@@ -21,7 +22,7 @@ const TABS: { key: Tab; emoji: string; label: string }[] = [
 
 function Shell() {
   const insets = useSafeAreaInsets();
-  const { state, hydrated } = useHousehold();
+  const { state, phase, flat, error, retry } = useHousehold();
   const [tab, setTab] = useState<Tab>("split");
 
   const totalSpend = useMemo(
@@ -33,8 +34,28 @@ function Shell() {
     [state.asks]
   );
 
-  if (!hydrated) {
+  if (phase === "loading") {
     return <View style={{ flex: 1, backgroundColor: COLORS.bg }} />;
+  }
+
+  if (phase === "error") {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.errorTitle}>Can't reach the flat ☁️</Text>
+        <Text style={styles.errorDetail}>{error}</Text>
+        <Pressable onPress={retry} style={styles.retryBtn}>
+          <Text style={styles.retryLabel}>Try again</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (phase === "onboarding") {
+    return (
+      <View style={[styles.root, { paddingTop: insets.top }]}>
+        <OnboardingScreen />
+      </View>
+    );
   }
 
   return (
@@ -48,9 +69,14 @@ function Shell() {
             </Text>
             <Text style={styles.subline}>
               {tab === "split"
-                ? `${state.people.length} flatmates · €${totalSpend.toFixed(2)} total`
-                : `${state.people.length} flatmates · ${openAsks} open ask${openAsks === 1 ? "" : "s"}`}
+                ? `${state.people.length} flatmate${state.people.length === 1 ? "" : "s"} · €${totalSpend.toFixed(2)} total`
+                : `${state.people.length} flatmate${state.people.length === 1 ? "" : "s"} · ${openAsks} open ask${openAsks === 1 ? "" : "s"}`}
             </Text>
+            {flat && (
+              <Text style={styles.flatLine}>
+                {flat.name} · invite {flat.inviteCode}
+              </Text>
+            )}
           </View>
           <View style={{ flexDirection: "row" }}>
             {state.people.map((p, i) => (
@@ -143,6 +169,43 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#666",
     marginTop: 4,
+  },
+  flatLine: {
+    fontFamily: FONTS.mono,
+    fontSize: 11,
+    color: COLORS.teal,
+    marginTop: 2,
+  },
+  centered: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 32,
+    gap: 10,
+  },
+  errorTitle: {
+    fontFamily: FONTS.display,
+    fontSize: 17,
+    color: COLORS.text,
+  },
+  errorDetail: {
+    fontFamily: FONTS.sans,
+    fontSize: 13,
+    color: COLORS.textDim,
+    textAlign: "center",
+  },
+  retryBtn: {
+    marginTop: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: COLORS.coral,
+  },
+  retryLabel: {
+    fontFamily: FONTS.display,
+    fontSize: 14,
+    color: "#fff",
   },
   tabBar: {
     flexDirection: "row",

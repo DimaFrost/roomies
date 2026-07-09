@@ -30,13 +30,13 @@ const QUICK_ASKS = [
 const ANYONE = "anyone";
 
 export function AsksScreen() {
-  const { state, addAsk, acceptAsk, completeAsk, deleteAsk } = useHousehold();
+  const { state, addAsk, acceptAsk, completeAsk, deleteAsk, myName } = useHousehold();
   const { people, asks } = state;
 
   const [composing, setComposing] = useState(false);
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
-  const [askedBy, setAskedBy] = useState(people[0]);
+  const [askedBy, setAskedBy] = useState(myName ?? people[0]);
   const [target, setTarget] = useState<string>(ANYONE);
 
   const open = useMemo(() => asks.filter((a) => a.status === "open"), [asks]);

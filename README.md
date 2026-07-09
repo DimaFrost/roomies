@@ -19,7 +19,12 @@ Built with [Expo](https://expo.dev) / React Native, so it runs as a real mobile 
 - Flatmates accept ("I'm on it"), then mark done
 - Open-ask badge on the tab so nothing gets missed
 
-All data is stored on-device (AsyncStorage) — no account needed for v1.
+### ☁️ Sync — every flatmate on their own phone
+- First launch: create a flat (you get a 6-letter invite code) or join with a code
+- Everything syncs live between phones via Supabase realtime
+- No signup friction: each device gets an invisible auto-provisioned account
+- Access is enforced server-side with Postgres row-level security — only members of your flat can read or write its data
+- Without a configured backend (`.env` absent) the app falls back to single-device local mode
 
 ## Getting started
 
@@ -29,6 +34,15 @@ npx expo start
 ```
 
 Then scan the QR code with [Expo Go](https://expo.dev/go) on your phone, or press `i` / `a` for a simulator, `w` for web.
+
+## Backend
+
+The Supabase backend lives in the `deurbanize` project (shared, everything
+prefixed `roomies_`). Client config is in `.env` (publishable values only).
+The schema, RLS policies, and RPCs are in `supabase/migrations/` and the
+device-account edge function in `supabase/functions/roomies-create-device-user/`
+— both already applied/deployed. To move to a dedicated project later: create
+it, run the migrations, deploy the function (`verify_jwt` off), and update `.env`.
 
 ## Project layout
 
@@ -50,7 +64,7 @@ src/
 
 ## Roadmap
 
-- [ ] **Accounts & sync** — shared household backed by a realtime backend (Supabase), so each flatmate uses their own phone
+- [x] **Accounts & sync** — shared household backed by Supabase realtime, so each flatmate uses their own phone
 - [ ] **Push notifications** — "Dima posted an ask", "Chris settled up"
 - [ ] **Recurring chores** — rotating schedules (bins, bathroom, plants)
 - [ ] **Shopping list** — shared list that turns purchases into expenses

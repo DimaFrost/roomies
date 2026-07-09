@@ -35,23 +35,28 @@ const CATEGORIES = [
 type SubTab = "add" | "history";
 
 export function ExpensesScreen() {
-  const { state, addExpense, deleteExpense, recordSettlement } = useHousehold();
+  const { state, addExpense, deleteExpense, recordSettlement, myName } = useHousehold();
   const { people, expenses } = state;
 
   const [subTab, setSubTab] = useState<SubTab>("add");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState(CATEGORIES[0]);
-  const [paidBy, setPaidBy] = useState(people[0]);
+  const [paidBy, setPaidBy] = useState(myName ?? people[0]);
   const [split, setSplit] = useState<SplitType>("even");
-  const [forPerson, setForPerson] = useState(people[1]);
+  const [forPerson, setForPerson] = useState<string | undefined>(people.find((p) => p !== (myName ?? people[0])));
   const [added, setAdded] = useState(false);
 
   const balances = useMemo(() => computeBalances(people, expenses), [people, expenses]);
   const settlements = useMemo(() => computeSettlements(balances), [balances]);
+  const hasOthers = people.length > 1;
 
   const parsedAmount = parseFloat(amount.replace(",", "."));
-  const canAdd = !Number.isNaN(parsedAmount) && parsedAmount > 0 && description.trim().length > 0;
+  const canAdd =
+    !Number.isNaN(parsedAmount) &&
+    parsedAmount > 0 &&
+    description.trim().length > 0 &&
+    (split === "even" || !!forPerson);
 
   function selectPaidBy(p: string) {
     setPaidBy(p);
@@ -179,14 +184,16 @@ export function ExpensesScreen() {
                 active={split === "even"}
                 onPress={() => setSplit("even")}
               />
-              <SplitOption
-                emoji="💸"
-                title="Full amount"
-                subtitle="one person owes"
-                color={COLORS.yellow}
-                active={split === "full"}
-                onPress={() => setSplit("full")}
-              />
+              {hasOthers && (
+                <SplitOption
+                  emoji="💸"
+                  title="Full amount"
+                  subtitle="one person owes"
+                  color={COLORS.yellow}
+                  active={split === "full"}
+                  onPress={() => setSplit("full")}
+                />
+              )}
             </View>
 
             {split === "full" && (
