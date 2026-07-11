@@ -95,22 +95,32 @@ build/submit/OTA service). The ladder, least → most effort:
 | Your own installable app (no SDK ceiling) | `eas build` + `expo-dev-client` | Custom native runtime; unlocks any SDK; install once, then OTA |
 | Remote testers, no cables | **TestFlight** via `eas build` + `eas submit` | The real answer for on-device remote testing (paid Apple Developer account) |
 
-**Recommended for this project** (you have a paid Apple Developer account + Xcode):
+**Recommended for this project** (you have a paid Apple Developer account + Xcode).
+The repo is already scaffolded: `eas.json` defines a `preview` (internal
+distribution) and a `production` (TestFlight/App Store) profile, and the iOS
+bundle identifier is set in `app.json` (`com.madebyfrost.roomies`). So you skip
+`eas build:configure` and go straight to:
 
-1. `npm i -g eas-cli && eas login`
-2. `eas build:configure` — generates `eas.json`
-3. `eas build --platform ios --profile preview` — EAS builds & signs in the
-   cloud (it can manage your Apple certs/profiles for you)
-4. `eas submit --platform ios --latest` — uploads to App Store Connect →
-   **TestFlight**
-5. Add testers in App Store Connect:
+1. `npm i -g eas-cli && eas login` — sign in to your Expo account
+2. `eas init` — links the repo to an EAS project (writes `extra.eas.projectId`)
+3. `eas build --platform ios --profile production` — EAS builds & signs in the
+   cloud (it can create/manage your Apple certs & provisioning profiles; you'll
+   authenticate with your Apple ID once)
+4. `eas submit --platform ios --latest` — uploads the build to App Store Connect
+   → **TestFlight** (prompts for Apple credentials / creates the ASC app entry
+   the first time)
+5. Add testers in App Store Connect → TestFlight:
    - **Internal** (up to 100, on your team): builds appear instantly, no review
    - **External** (up to 10,000, via public link): one-time lightweight beta review
 
-For the tightest dev loop, add `expo-dev-client` and pair a **development build**
-with `eas update` — install the dev build once per device, then ship JS changes
-OTA without rebuilding. Moving to any EAS build also lets you leave SDK 54 behind
-(see the SDK gotcha above), since the app then carries its own runtime.
+Use `--profile preview` instead at step 3 for an ad-hoc internal build you install
+straight from an EAS link/QR (registers tester device UDIDs) without going through
+TestFlight — handy for a quick build to your own device.
+
+For the tightest dev loop later, add `expo-dev-client` and pair a **development
+build** with `eas update` — install the dev build once per device, then ship JS
+changes OTA without rebuilding. Moving to any EAS build also lets you leave SDK 54
+behind (see the SDK gotcha above), since the app then carries its own runtime.
 
 ## Roadmap
 
