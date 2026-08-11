@@ -18,6 +18,8 @@ struct RoomiesApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    private static let log = Logger(subsystem: "madebyfrost.roomies", category: "sharing")
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -28,23 +30,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         return true
     }
 
+    /// Fires when an invite link is opened. Handled on the app delegate rather
+    /// than a custom scene delegate, which would mean taking over the scene
+    /// configuration that SwiftUI's `WindowGroup` sets up for us.
     func application(
         _ application: UIApplication,
-        configurationForConnecting connectingSceneSession: UISceneSession,
-        options: UIScene.ConnectionOptions
-    ) -> UISceneConfiguration {
-        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
-        configuration.delegateClass = SceneDelegate.self
-        return configuration
-    }
-}
-
-/// Exists solely to catch accepted share invitations, which arrive as a scene callback.
-final class SceneDelegate: NSObject, UIWindowSceneDelegate {
-    private static let log = Logger(subsystem: "com.dimafrost.roomies", category: "sharing")
-
-    func windowScene(
-        _ windowScene: UIWindowScene,
         userDidAcceptCloudKitShareWith cloudKitShareMetadata: CKShare.Metadata
     ) {
         Task {

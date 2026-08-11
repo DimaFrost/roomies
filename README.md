@@ -38,7 +38,7 @@ A native iPhone app: SwiftUI, Core Data, and CloudKit. No server, no accounts, n
 1. Open `Roomies.xcodeproj` in Xcode.
 2. Select the **Roomies** target → *Signing & Capabilities*, and set your team.
    Signing is automatic; the CloudKit container is declared in
-   `Config/Roomies.entitlements` as `iCloud.com.dimafrost.roomies`.
+   `Config/Roomies.entitlements` as `iCloud.madebyfrost.roomies`.
 3. If you use a different bundle identifier, change `PRODUCT_BUNDLE_IDENTIFIER`
    and update the container ID in both the entitlements file and
    `Persistence.cloudKitContainerIdentifier` so all three agree.
@@ -77,7 +77,7 @@ Config/
   Info.plist               dark-only, portrait, remote-notification background mode
   Roomies.entitlements     CloudKit container + push
 Roomies/
-  RoomiesApp.swift         app entry, scene delegate that accepts share invites
+  RoomiesApp.swift         app entry, app delegate that accepts share invites
   Model/
     Roomies.xcdatamodeld   Household / Member / Expense / Ask
     Persistence.swift      two-store CloudKit stack, CKShare helpers

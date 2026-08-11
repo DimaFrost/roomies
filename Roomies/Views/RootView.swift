@@ -162,8 +162,10 @@ struct HouseholdShell: View {
             Spacer(minLength: 0)
 
             HStack(spacing: -10) {
-                ForEach(Array(people.enumerated()), id: \.element) { index, person in
-                    AvatarView(name: person, people: people, size: 32)
+                // Indices rather than enumerated(), so the earliest flatmate
+                // stays on top of the overlap.
+                ForEach(people.indices, id: \.self) { index in
+                    AvatarView(name: people[index], people: people, size: 32)
                         .zIndex(Double(people.count - index))
                 }
             }

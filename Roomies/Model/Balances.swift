@@ -65,11 +65,8 @@ enum Balances {
         // people owe the same amount this pairs them differently from the old
         // JS version (which leaned on insertion order); the transfer count and
         // amounts are identical either way, and everyone still ends square.
-        let byAmountThenName: ((person: String, amount: Double), (person: String, amount: Double)) -> Bool = {
-            $0.amount == $1.amount ? $0.person < $1.person : $0.amount > $1.amount
-        }
-        creditors.sort(by: byAmountThenName)
-        debtors.sort(by: byAmountThenName)
+        creditors.sort { $0.amount == $1.amount ? $0.person < $1.person : $0.amount > $1.amount }
+        debtors.sort { $0.amount == $1.amount ? $0.person < $1.person : $0.amount > $1.amount }
 
         var settlements: [Settlement] = []
         var i = 0

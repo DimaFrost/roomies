@@ -11,9 +11,9 @@ import os
 final class Persistence {
     static let shared = Persistence()
 
-    static let cloudKitContainerIdentifier = "iCloud.com.dimafrost.roomies"
+    static let cloudKitContainerIdentifier = "iCloud.madebyfrost.roomies"
 
-    private static let log = Logger(subsystem: "com.dimafrost.roomies", category: "persistence")
+    private static let log = Logger(subsystem: "madebyfrost.roomies", category: "persistence")
 
     let container: NSPersistentCloudKitContainer
 

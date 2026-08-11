@@ -12,9 +12,9 @@ final class HouseholdStore: ObservableObject {
     private var context: NSManagedObjectContext { persistence.viewContext }
 
     /// The member name chosen on this device. Empty until onboarding finishes.
-    @Published var myName: String {
-        didSet { UserDefaults.standard.set(myName, forKey: Self.myNameKey) }
-    }
+    /// Written only through `setMyName` so the default keeps in step; a `didSet`
+    /// observer on a `@Published` property is not worth relying on.
+    @Published private(set) var myName: String
 
     @Published var errorMessage: String?
 
@@ -23,6 +23,11 @@ final class HouseholdStore: ObservableObject {
     nonisolated init(persistence: Persistence = .shared) {
         self.persistence = persistence
         self.myName = UserDefaults.standard.string(forKey: Self.myNameKey) ?? ""
+    }
+
+    private func setMyName(_ name: String) {
+        myName = name
+        UserDefaults.standard.set(name, forKey: Self.myNameKey)
     }
 
     // MARK: - Household
@@ -35,7 +40,7 @@ final class HouseholdStore: ObservableObject {
         household.createdAt = .now
 
         addMember(named: memberName, to: household)
-        myName = memberName.trimmed
+        setMyName(memberName.trimmed)
         persistence.save()
         return household
     }
@@ -58,7 +63,7 @@ final class HouseholdStore: ObservableObject {
         let trimmed = name.trimmed
         guard !trimmed.isEmpty else { return }
         addMember(named: trimmed, to: household)
-        myName = trimmed
+        setMyName(trimmed)
     }
 
     // MARK: - Expenses

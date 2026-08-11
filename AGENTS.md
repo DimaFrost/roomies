@@ -42,8 +42,10 @@ Fetches span both, so a `@FetchRequest` for `Household` returns either kind.
 Flatmates are joined via **CKShare**, not an invite code. The owner taps
 *invite*, which calls `NSPersistentCloudKitContainer.share(_:to:)` and presents
 `UICloudSharingController`. The recipient taps the link; the app receives
-`windowScene(_:userDidAcceptCloudKitShareWith:)` and calls
-`acceptShareInvitations(from:into:)` against the shared store.
+`application(_:userDidAcceptCloudKitShareWith:)` on the app delegate and calls
+`acceptShareInvitations(from:into:)` against the shared store. It is handled
+there rather than on a custom scene delegate, which would mean overriding the
+scene configuration SwiftUI's `WindowGroup` provides.
 
 Names are stored as plain strings on records (as in the original), and this
 device's own name lives in `UserDefaults` under `roomies.myName`. That keeps
