@@ -2,16 +2,16 @@
 
 **A flatmates OS.** One app for everything you share with the people you live with — starting with money, growing into favours, chores, and everything else that keeps a flat running.
 
-Built with [Expo](https://expo.dev) / React Native, so it runs as a real mobile app on iOS and Android (and on the web).
+A native iPhone app: SwiftUI, Core Data, and CloudKit. No server, no accounts, no third-party dependencies — the flat lives in your own iCloud.
 
 ## Features
 
 ### 💶 Split — expense tracking
 - Log shared expenses with categories (food, groceries, rent, …)
-- Split evenly across the household, or assign the full amount to one person
+- Split evenly across the flat, or assign the full amount to one person
 - Live "who owes what" panel that nets everything into the minimal set of transfers
 - One-tap **Settle** records the payback and zeroes the balance
-- Full history with long-press to delete
+- Full history; long-press an entry to delete it
 
 ### 🤝 Asks — post a favour
 - Post an ask — "water my plants", "grab milk on your way home" — for a specific flatmate or anyone
@@ -19,114 +19,111 @@ Built with [Expo](https://expo.dev) / React Native, so it runs as a real mobile 
 - Flatmates accept ("I'm on it"), then mark done
 - Open-ask badge on the tab so nothing gets missed
 
-### ☁️ Sync — every flatmate on their own phone
-- First launch: create a flat (you get a 6-letter invite code) or join with a code
-- Everything syncs live between phones via Supabase realtime
-- No signup friction: each device gets an invisible auto-provisioned account
-- Access is enforced server-side with Postgres row-level security — only members of your flat can read or write its data
-- Without a configured backend (`.env` absent) the app falls back to single-device local mode
+### ☁️ Sync — every flatmate on their own iPhone
+- Create a flat, then tap **invite** and send the link however you like — Messages, WhatsApp, AirDrop
+- Your flatmate opens the link and the flat appears on their phone, expenses and asks included
+- Changes sync both ways over CloudKit, usually within seconds
+- No sign-up, no passwords, no backend of ours: identity is the iCloud account already on the phone
+- Everything also works offline and syncs when the phone reconnects
+
+## Requirements
+
+- Xcode 16 or newer, iOS 17+ target
+- **A paid Apple Developer Program membership.** CloudKit is not available with
+  free provisioning, so the app cannot sync (or even launch its store) without it.
+- An iCloud account signed in on each device
 
 ## Getting started
 
-```bash
-npm install
-npx expo start
-```
+1. Open `Roomies.xcodeproj` in Xcode.
+2. Select the **Roomies** target → *Signing & Capabilities*, and set your team.
+   Signing is automatic; the CloudKit container is declared in
+   `Config/Roomies.entitlements` as `iCloud.com.dimafrost.roomies`.
+3. If you use a different bundle identifier, change `PRODUCT_BUNDLE_IDENTIFIER`
+   and update the container ID in both the entitlements file and
+   `Persistence.cloudKitContainerIdentifier` so all three agree.
+4. Build and run on a device (⌘R).
 
-Then scan the QR code with [Expo Go](https://expo.dev/go) on your phone, or press `i` / `a` for a simulator, `w` for web. If your phone isn't on the same Wi-Fi as your computer, use `npx expo start --tunnel`.
+The first launch creates the CloudKit schema in the *development* environment
+automatically. Before shipping, promote it to production in the
+[CloudKit Console](https://icloud.developer.apple.com/).
 
-### ⚠️ SDK version gotcha (read before bumping `expo`)
+### Testing sync properly
 
-Expo Go on the App Store / Play Store only runs projects built on the **SDK it
-was compiled for** — and the store apps trail npm by weeks. The store's Expo Go
-is currently on **SDK 54**, so this project is pinned to `expo@~54.0.0`. That is
-deliberate.
+Sharing is between **two different Apple IDs**, so a single simulator can't show
+you the real thing. Run on your own iPhone, tap *invite*, and send the link to a
+second device signed in as someone else.
 
-`create-expo-app` and `npx expo install expo@latest` will happily pull a *newer*
-SDK (npm's `latest` was already SDK 57), which then fails to open in Expo Go with
-**"Project requires a newer version of Expo Go."** The project isn't broken — it's
-ahead of the released client.
+## How sync works
 
-Rules of thumb:
-- Staying on Expo Go for testing → keep the `expo` major at whatever the store's
-  Expo Go supports. To realign every dependency after changing it:
-  `npm install expo@~54.0.0 && npx expo install --fix`.
-- Need a newer SDK (or want to stop caring about this) → move to a **development
-  build** (`expo-dev-client` + EAS), which bundles its own native runtime and is
-  not tied to store Expo Go. See **Distribution & remote testing** below.
+Core Data mirrors to CloudKit through `NSPersistentCloudKitContainer`, with two
+stores loaded against one model:
 
-## Backend
+| Store | CloudKit database | Holds |
+| --- | --- | --- |
+| `private.sqlite` | private | flats this device created |
+| `shared.sqlite` | shared | flats a flatmate invited us into |
 
-The Supabase backend lives in the `deurbanize` project (shared, everything
-prefixed `roomies_`). Client config is in `.env` (publishable values only).
-The schema, RLS policies, and RPCs are in `supabase/migrations/` and the
-device-account edge function in `supabase/functions/roomies-create-device-user/`
-— both already applied/deployed. To move to a dedicated project later: create
-it, run the migrations, deploy the function (`verify_jwt` off), and update `.env`.
+Fetches span both stores, so the UI does not care which kind of flat it is
+showing. Inviting a flatmate creates a `CKShare` over the `Household` record;
+because every expense, ask, and member hangs off that household, the whole flat
+travels with the share.
 
 ## Project layout
 
 ```
-App.tsx                    app shell: fonts, header, bottom tabs
-src/
-  theme.ts                 colors, fonts, member palette
-  types.ts                 Expense / Ask / household types
-  store.tsx                household state + AsyncStorage persistence
-  lib/
-    balances.ts            balance + minimal-settlement math (pure)
-    confirm.ts             cross-platform confirm dialog
-    time.ts                relative timestamps, ids
-  components/              Avatar, Card, Tag, PersonPicker
-  screens/
-    ExpensesScreen.tsx     add expense, history, settlements panel
-    AsksScreen.tsx         post / accept / complete asks
+Roomies.xcodeproj          Xcode 16 synchronized-folder project
+Config/
+  Info.plist               dark-only, portrait, remote-notification background mode
+  Roomies.entitlements     CloudKit container + push
+Roomies/
+  RoomiesApp.swift         app entry, scene delegate that accepts share invites
+  Model/
+    Roomies.xcdatamodeld   Household / Member / Expense / Ask
+    Persistence.swift      two-store CloudKit stack, CKShare helpers
+    HouseholdStore.swift   mutations, plus this device's member name
+    Domain.swift           typed accessors, categories, quick asks
+    Balances.swift         balance + minimal-settlement math (pure)
+  Views/
+    RootView.swift         header, bottom tabs, invite affordance
+    SplitView.swift        add expense, history, settlements panel
+    AsksView.swift         post / accept / complete asks
+    WelcomeView.swift      create a flat; claim a name after accepting an invite
+    CloudSharingSheet.swift  UICloudSharingController bridge
+    Components.swift       Avatar, Card, Tag, PersonPicker, chips, flow layout
+  Support/
+    Theme.swift            colours, member palette, font roles
+    RelativeTime.swift     relative timestamps, euro formatting
 ```
 
-## Distribution & remote testing
+## Notes on the port
 
-Expo Go + LAN (or `--tunnel`) is fine for solo iteration, but for testers who
-aren't next to your laptop, use [EAS](https://docs.expo.dev/eas/) (Expo's cloud
-build/submit/OTA service). The ladder, least → most effort:
+This started as an Expo/React Native app backed by Supabase. Re-scoping it to
+iOS-only let the backend disappear entirely — CloudKit replaces Postgres, row
+level security, device accounts, and the invite-code table with the iCloud
+account already on the phone.
 
-| Goal | Tool | Notes |
-| --- | --- | --- |
-| Test off your Wi-Fi, still Expo Go | `npx expo start --tunnel` | Zero setup; laptop must stay running; still bound to store Expo Go's SDK |
-| Push JS updates over-the-air | `eas update` | Testers pull new JS into an existing build; no rebuild for JS-only changes |
-| Your own installable app (no SDK ceiling) | `eas build` + `expo-dev-client` | Custom native runtime; unlocks any SDK; install once, then OTA |
-| Remote testers, no cables | **TestFlight** via `eas build` + `eas submit` | The real answer for on-device remote testing (paid Apple Developer account) |
+Two visible consequences:
 
-**Recommended for this project** (you have a paid Apple Developer account + Xcode).
-The repo is already scaffolded: `eas.json` defines a `preview` (internal
-distribution) and a `production` (TestFlight/App Store) profile, and the iOS
-bundle identifier is set in `app.json` (`com.madebyfrost.roomies`). So you skip
-`eas build:configure` and go straight to:
+- **Invite codes are gone.** Joining is a share link, which is both less to
+  build and less to mistype.
+- **Fonts are the system faces.** The original used DM Sans / DM Mono / Syne from
+  Google Fonts; the SwiftUI build maps those roles onto San Francisco
+  (`.rounded` for display, `.monospaced` for figures) so nothing is bundled and
+  Dynamic Type keeps working.
 
-1. `npm i -g eas-cli && eas login` — sign in to your Expo account
-2. `eas init` — links the repo to an EAS project (writes `extra.eas.projectId`)
-3. `eas build --platform ios --profile production` — EAS builds & signs in the
-   cloud (it can create/manage your Apple certs & provisioning profiles; you'll
-   authenticate with your Apple ID once)
-4. `eas submit --platform ios --latest` — uploads the build to App Store Connect
-   → **TestFlight** (prompts for Apple credentials / creates the ASC app entry
-   the first time)
-5. Add testers in App Store Connect → TestFlight:
-   - **Internal** (up to 100, on your team): builds appear instantly, no review
-   - **External** (up to 10,000, via public link): one-time lightweight beta review
-
-Use `--profile preview` instead at step 3 for an ad-hoc internal build you install
-straight from an EAS link/QR (registers tester device UDIDs) without going through
-TestFlight — handy for a quick build to your own device.
-
-For the tightest dev loop later, add `expo-dev-client` and pair a **development
-build** with `eas update` — install the dev build once per device, then ship JS
-changes OTA without rebuilding. Moving to any EAS build also lets you leave SDK 54
-behind (see the SDK gotcha above), since the app then carries its own runtime.
+The balance and settlement math was checked against the original implementation
+over 4,000 generated scenarios: balances are identical in every case. Settlements
+differ only when two people owe exactly the same amount — Swift randomises
+dictionary order, so ties are now broken by name to stop the list reshuffling on
+each redraw. The number of transfers and the amounts are unchanged.
 
 ## Roadmap
 
-- [x] **Accounts & sync** — shared household backed by Supabase realtime, so each flatmate uses their own phone
+- [x] **Accounts & sync** — shared flat over CloudKit, each flatmate on their own phone
 - [ ] **Push notifications** — "Dima posted an ask", "Chris settled up"
 - [ ] **Recurring chores** — rotating schedules (bins, bathroom, plants)
 - [ ] **Shopping list** — shared list that turns purchases into expenses
 - [ ] **Ask ↔ expense link** — "buy milk" ask completes into a logged expense
-- [ ] **Household setup** — invite flow, custom names/colors, more than two flatmates (the balance math already supports n people)
+- [ ] **Widgets & Live Activities** — balance on the home screen
+- [ ] **Apple Watch companion** — tick off an ask from your wrist

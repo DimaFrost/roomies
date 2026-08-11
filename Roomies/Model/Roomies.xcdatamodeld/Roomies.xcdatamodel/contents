@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23504" systemVersion="24A335" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithCloudKit="YES" userDefinedModelVersionIdentifier="">
+    <!--
+      CloudKit mirroring constrains the schema: every attribute must be optional or
+      carry a default, relationships must be optional and have an inverse, and
+      unique constraints are not allowed. The model below stays inside those rules.
+    -->
+    <entity name="Household" representedClassName="Household" syncable="YES" codeGenerationType="class">
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <relationship name="asks" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Ask" inverseName="household" inverseEntity="Ask"/>
+        <relationship name="expenses" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Expense" inverseName="household" inverseEntity="Expense"/>
+        <relationship name="members" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="Member" inverseName="household" inverseEntity="Member"/>
+    </entity>
+    <entity name="Member" representedClassName="Member" syncable="YES" codeGenerationType="class">
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <relationship name="household" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Household" inverseName="members" inverseEntity="Household"/>
+    </entity>
+    <entity name="Expense" representedClassName="Expense" syncable="YES" codeGenerationType="class">
+        <attribute name="amount" optional="NO" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="category" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <!-- "forPerson" carries the debtor when splitRaw == "full". -->
+        <attribute name="forPerson" optional="YES" attributeType="String"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="paidBy" optional="YES" attributeType="String"/>
+        <attribute name="splitRaw" optional="YES" attributeType="String" defaultValueString="even"/>
+        <!-- Named "title" rather than "description" to avoid shadowing NSObject.description. -->
+        <attribute name="title" optional="YES" attributeType="String"/>
+        <relationship name="household" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Household" inverseName="expenses" inverseEntity="Household"/>
+    </entity>
+    <entity name="Ask" representedClassName="Ask" syncable="YES" codeGenerationType="class">
+        <attribute name="acceptedBy" optional="YES" attributeType="String"/>
+        <attribute name="askedBy" optional="YES" attributeType="String"/>
+        <!-- nil assignedTo means the ask is open to anyone. -->
+        <attribute name="assignedTo" optional="YES" attributeType="String"/>
+        <attribute name="completedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="note" optional="YES" attributeType="String"/>
+        <attribute name="statusRaw" optional="YES" attributeType="String" defaultValueString="open"/>
+        <attribute name="title" optional="YES" attributeType="String"/>
+        <relationship name="household" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Household" inverseName="asks" inverseEntity="Household"/>
+    </entity>
+</model>
