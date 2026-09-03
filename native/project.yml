@@ -23,6 +23,11 @@ targets:
         UIBackgroundModes:
           - remote-notification
         ITSAppUsesNonExemptEncryption: false
+        # These must reference the build settings rather than be left to XcodeGen's defaults,
+        # which hardcode 1 / 1.0 — bumping CURRENT_PROJECT_VERSION below then silently produced
+        # another "build 1" archive, which App Store Connect rejects as a duplicate.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         NSCalendarsFullAccessUsageDescription: Roomies reads your calendar to show flatmates when you're busy or away. Event names stay on your device unless you choose to share them.
         NSCalendarsUsageDescription: Roomies reads your calendar to show flatmates when you're busy or away. Event names stay on your device unless you choose to share them.
     entitlements:
@@ -42,4 +47,4 @@ targets:
         ENABLE_PREVIEWS: true
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
