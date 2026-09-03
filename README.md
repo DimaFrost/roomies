@@ -1,17 +1,21 @@
-# Roomies 🏠
+# at our place 🏠
 
-**A flatmates OS.** One app for everything you share with the people you live with — starting with money, growing into favours, chores, and everything else that keeps a flat running.
+**A flatmates OS.** One app for everything you share with the people you live with — money, favours, and when everyone's around.
 
-Built with [Expo](https://expo.dev) / React Native, so it runs as a real mobile app on iOS and Android (and on the web).
+Native Swift/SwiftUI, iOS only. Sync is [CloudKit](https://developer.apple.com/icloud/cloudkit/) — no third-party backend, no signup, no passwords: flatmates share a household through their existing iCloud accounts via `CKShare`.
+
+> **History:** this started as an Expo/React Native app synced through Supabase, targeting iOS, Android, and web. It's now a Swift-native, CloudKit-only build — trading Android/web for a backend-free architecture. The old Expo source is still in the repo root (`App.tsx`, `src/`, `supabase/`) but is no longer the app; everything current lives in `native/`.
+>
+> The repo, bundle identifier (`com.madebyfrost.roomies`), and internal type names still say "roomies" — only the user-facing name changed. Renaming those would orphan the App Store Connect record and CloudKit container.
 
 ## Features
 
 ### 💶 Split — expense tracking
-- Log shared expenses with categories (food, groceries, rent, …)
+- Log shared expenses with categories, back-dating to any past day
 - Split evenly across the household, or assign the full amount to one person
 - Live "who owes what" panel that nets everything into the minimal set of transfers
 - One-tap **Settle** records the payback and zeroes the balance
-- Full history with long-press to delete
+- Only the person who paid can delete an expense
 
 ### 🤝 Asks — post a favour
 - Post an ask — "water my plants", "grab milk on your way home" — for a specific flatmate or anyone
@@ -19,114 +23,107 @@ Built with [Expo](https://expo.dev) / React Native, so it runs as a real mobile 
 - Flatmates accept ("I'm on it"), then mark done
 - Open-ask badge on the tab so nothing gets missed
 
-### ☁️ Sync — every flatmate on their own phone
-- First launch: create a flat (you get a 6-letter invite code) or join with a code
-- Everything syncs live between phones via Supabase realtime
-- No signup friction: each device gets an invisible auto-provisioned account
-- Access is enforced server-side with Postgres row-level security — only members of your flat can read or write its data
-- Without a configured backend (`.env` absent) the app falls back to single-device local mode
+### 🗓 Plans — shared availability, private details
+- Connect your phone calendar and Roomies publishes **only busy blocks** — start and end times, no event names
+- All-day events get an explicit per-event opt-in to share the name, since "Travelling to London" is useful context
+- No calendar access? Log travel and plans by hand instead, with a per-plan "share the name" toggle
+- Invite flatmates along to a plan you're creating
+
+### 🏠 Flat — household management
+- Rename the flat, invite flatmates (opens the iCloud share sheet), remove flatmates
+- Ground truth everyone should agree on: monthly rent amount and due day
+- Recurring bills (internet, electricity…) with due days
+
+### ☁️ Sync
+- First launch: create a flat, then send the iCloud share link — tapping it joins them, no codes or accounts
+- Everything syncs between devices through a shared CloudKit record zone
+- Access control is iCloud's: only share participants can read or write the zone
 
 ## Getting started
 
+Requires Xcode and a paid Apple Developer account (CloudKit and device installs need real signing).
+
 ```bash
-npm install
-npx expo start
+brew install xcodegen          # the .xcodeproj is generated, not committed
+cd native
+xcodegen generate
+open Roomies.xcodeproj
 ```
 
-Then scan the QR code with [Expo Go](https://expo.dev/go) on your phone, or press `i` / `a` for a simulator, `w` for web. If your phone isn't on the same Wi-Fi as your computer, use `npx expo start --tunnel`.
+Then pick a device and hit Run. From the CLI:
 
-### ⚠️ SDK version gotcha (read before bumping `expo`)
+```bash
+# simulator (note: CloudKit needs an iCloud account signed into the simulator)
+xcodebuild -project Roomies.xcodeproj -scheme Roomies \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 
-Expo Go on the App Store / Play Store only runs projects built on the **SDK it
-was compiled for** — and the store apps trail npm by weeks. The store's Expo Go
-is currently on **SDK 54**, so this project is pinned to `expo@~54.0.0`. That is
-deliberate.
+# a real device — recommended, CloudKit sharing and push behave properly here
+xcrun devicectl list devices
+xcodebuild -project Roomies.xcodeproj -scheme Roomies \
+  -destination 'platform=iOS,id=<DEVICE_UDID>' -allowProvisioningUpdates build
+xcrun devicectl device install app --device <DEVICE_UDID> <path-to>/Roomies.app
+```
 
-`create-expo-app` and `npx expo install expo@latest` will happily pull a *newer*
-SDK (npm's `latest` was already SDK 57), which then fails to open in Expo Go with
-**"Project requires a newer version of Expo Go."** The project isn't broken — it's
-ahead of the released client.
+**Do not edit the project in Xcode's file/build-settings UI** — `project.yml` is the source of truth and `xcodegen generate` overwrites the `.xcodeproj`.
 
-Rules of thumb:
-- Staying on Expo Go for testing → keep the `expo` major at whatever the store's
-  Expo Go supports. To realign every dependency after changing it:
-  `npm install expo@~54.0.0 && npx expo install --fix`.
-- Need a newer SDK (or want to stop caring about this) → move to a **development
-  build** (`expo-dev-client` + EAS), which bundles its own native runtime and is
-  not tied to store Expo Go. See **Distribution & remote testing** below.
+### ⚠️ CloudKit schema gotcha (read this before shipping)
 
-## Backend
+CloudKit has two environments, and they behave differently:
 
-The Supabase backend lives in the `deurbanize` project (shared, everything
-prefixed `roomies_`). Client config is in `.env` (publishable values only).
-The schema, RLS policies, and RPCs are in `supabase/migrations/` and the
-device-account edge function in `supabase/functions/roomies-create-device-user/`
-— both already applied/deployed. To move to a dedicated project later: create
-it, run the migrations, deploy the function (`verify_jwt` off), and update `.env`.
+- **Development** — record types and fields are created automatically the first time the app saves a record of that type.
+- **Production** — never auto-creates anything. A build talking to Production against an undeployed schema fails with **"did not find record type: X"**.
+
+So after adding or changing any record type, you must: exercise the new write once on a Development build, then open the [CloudKit Console](https://icloud.developer.apple.com/) → **Deploy Schema Changes** to push it to Production. TestFlight and App Store builds use Production.
+
+Current record types: `Household`, `Member`, `Expense`, `Ask`, `Bill`, `PlanEvent`.
+
+Related trap: `CKQuery` requires a *queryable* index — even a match-everything predicate needs `recordName` marked queryable. This app deliberately avoids queries entirely and reads whole zones with `CKFetchRecordZoneChangesOperation`, which has no index dependency.
+
+## TestFlight
+
+The archive path is already configured (signing team, icon, version, encryption declaration):
+
+```bash
+cd native
+xcodebuild archive -project Roomies.xcodeproj -scheme Roomies \
+  -archivePath /tmp/Roomies.xcarchive -destination 'generic/platform=iOS' \
+  -allowProvisioningUpdates
+open /tmp/Roomies.xcarchive
+```
+
+Then in Organizer: **Distribute App → App Store Connect → Upload**. Once processed, add internal testers in App Store Connect → TestFlight (instant, no review).
 
 ## Project layout
 
 ```
-App.tsx                    app shell: fonts, header, bottom tabs
-src/
-  theme.ts                 colors, fonts, member palette
-  types.ts                 Expense / Ask / household types
-  store.tsx                household state + AsyncStorage persistence
-  lib/
-    balances.ts            balance + minimal-settlement math (pure)
-    confirm.ts             cross-platform confirm dialog
-    time.ts                relative timestamps, ids
-  components/              Avatar, Card, Tag, PersonPicker
-  screens/
-    ExpensesScreen.tsx     add expense, history, settlements panel
-    AsksScreen.tsx         post / accept / complete asks
+native/
+  project.yml                    XcodeGen spec — the source of truth for the Xcode project
+  Roomies/Sources/
+    App/                         app entry point, AppDelegate (CKShare acceptance, push)
+    Models/                      Expense/Ask/Bill/PlanEvent, balance math, time formatting
+    Store/
+      HouseholdStore.swift       CloudKit zone + share, all reads/writes, app phase
+      CalendarService.swift      EventKit reader (local only — never uploads directly)
+    Theme/                       colors, member palette, fonts
+    Components/                  Avatar, Card, Tag, PersonPicker, FlowLayout, share sheet
+    Screens/                     ContentView shell + Expenses, Asks, Plans, Settings, onboarding
 ```
 
-## Distribution & remote testing
+## Known gaps
 
-Expo Go + LAN (or `--tunnel`) is fine for solo iteration, but for testers who
-aren't next to your laptop, use [EAS](https://docs.expo.dev/eas/) (Expo's cloud
-build/submit/OTA service). The ladder, least → most effort:
-
-| Goal | Tool | Notes |
-| --- | --- | --- |
-| Test off your Wi-Fi, still Expo Go | `npx expo start --tunnel` | Zero setup; laptop must stay running; still bound to store Expo Go's SDK |
-| Push JS updates over-the-air | `eas update` | Testers pull new JS into an existing build; no rebuild for JS-only changes |
-| Your own installable app (no SDK ceiling) | `eas build` + `expo-dev-client` | Custom native runtime; unlocks any SDK; install once, then OTA |
-| Remote testers, no cables | **TestFlight** via `eas build` + `eas submit` | The real answer for on-device remote testing (paid Apple Developer account) |
-
-**Recommended for this project** (you have a paid Apple Developer account + Xcode).
-The repo is already scaffolded: `eas.json` defines a `preview` (internal
-distribution) and a `production` (TestFlight/App Store) profile, and the iOS
-bundle identifier is set in `app.json` (`com.madebyfrost.roomies`). So you skip
-`eas build:configure` and go straight to:
-
-1. `npm i -g eas-cli && eas login` — sign in to your Expo account
-2. `eas init` — links the repo to an EAS project (writes `extra.eas.projectId`)
-3. `eas build --platform ios --profile production` — EAS builds & signs in the
-   cloud (it can create/manage your Apple certs & provisioning profiles; you'll
-   authenticate with your Apple ID once)
-4. `eas submit --platform ios --latest` — uploads the build to App Store Connect
-   → **TestFlight** (prompts for Apple credentials / creates the ASC app entry
-   the first time)
-5. Add testers in App Store Connect → TestFlight:
-   - **Internal** (up to 100, on your team): builds appear instantly, no review
-   - **External** (up to 10,000, via public link): one-time lightweight beta review
-
-Use `--profile preview` instead at step 3 for an ad-hoc internal build you install
-straight from an EAS link/QR (registers tester device UDIDs) without going through
-TestFlight — handy for a quick build to your own device.
-
-For the tightest dev loop later, add `expo-dev-client` and pair a **development
-build** with `eas update` — install the dev build once per device, then ship JS
-changes OTA without rebuilding. Moving to any EAS build also lets you leave SDK 54
-behind (see the SDK gotcha above), since the app then carries its own runtime.
+- **Fonts** are system fonts; the original DM Sans / DM Mono / Syne files aren't bundled yet
+- **Calendar sync is manual** (a "Sync availability" button), not background
+- **Names must be unique** within a household — the balance math keys off name strings, and duplicate members are merged on refresh
+- Sync is a full zone re-fetch on launch/foreground/push rather than `CKSyncEngine` incremental sync — fine at household data volumes
 
 ## Roadmap
 
-- [x] **Accounts & sync** — shared household backed by Supabase realtime, so each flatmate uses their own phone
-- [ ] **Push notifications** — "Dima posted an ask", "Chris settled up"
+- [x] **Accounts & sync** — CloudKit shared zone, no signup
+- [x] **Household management** — invite/remove flatmates, rent + recurring bills
+- [x] **Plans** — privacy-preserving shared availability
+- [ ] **Push notifications** — "Dima posted an ask", "Chris settled up" (subscriptions are registered; no user-facing alerts yet)
 - [ ] **Recurring chores** — rotating schedules (bins, bathroom, plants)
 - [ ] **Shopping list** — shared list that turns purchases into expenses
 - [ ] **Ask ↔ expense link** — "buy milk" ask completes into a logged expense
-- [ ] **Household setup** — invite flow, custom names/colors, more than two flatmates (the balance math already supports n people)
+- [ ] **Bills → expenses** — recurring bills auto-log on their due day
+```
