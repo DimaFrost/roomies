@@ -51,6 +51,7 @@ final class HouseholdStore: ObservableObject {
     private static let householdRecordName = "household"
     private static let subscriptionSavedKey = "roomies.cloudkit.subscriptionSaved"
     private static let myMemberRecordKey = "roomies.myMemberRecordName"
+    private static let leftZonesKey = "roomies.leftZones"
 
     init() {
         HouseholdStore.current = self
@@ -116,7 +117,34 @@ final class HouseholdStore: ObservableObject {
 
     private func findZone(in db: CKDatabase) async throws -> CKRecordZone.ID? {
         let zones = try await db.allRecordZones()
-        return zones.first(where: { $0.zoneID.zoneName == HouseholdStore.zoneName })?.zoneID
+        let left = HouseholdStore.leftZones()
+        // Skip a zone we deliberately left. Removing ourselves from the share is the only way to
+        // stop CloudKit handing the zone back, and it isn't always permitted — without this,
+        // "Start over" reset the local state and the very next launch rediscovered the same
+        // shared zone and dropped the user straight back into the join screen, permanently.
+        return zones.first(where: {
+            $0.zoneID.zoneName == HouseholdStore.zoneName && !left.contains(HouseholdStore.zoneKey($0.zoneID))
+        })?.zoneID
+    }
+
+    private static func zoneKey(_ id: CKRecordZone.ID) -> String {
+        "\(id.zoneName)|\(id.ownerName)"
+    }
+
+    private static func leftZones() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: leftZonesKey) ?? [])
+    }
+
+    private static func markZoneLeft(_ id: CKRecordZone.ID) {
+        var left = leftZones()
+        left.insert(zoneKey(id))
+        UserDefaults.standard.set(Array(left), forKey: leftZonesKey)
+    }
+
+    private static func unmarkZoneLeft(_ id: CKRecordZone.ID) {
+        var left = leftZones()
+        left.remove(zoneKey(id))
+        UserDefaults.standard.set(Array(left), forKey: leftZonesKey)
     }
 
     private func findZone(named name: String, in db: CKDatabase) async throws -> CKRecordZone.ID? {
@@ -200,6 +228,8 @@ final class HouseholdStore: ObservableObject {
         database = container.sharedCloudDatabase
         zoneID = metadata.share.recordID.zoneID
         isOwner = false
+        // Accepting an invite to a flat we previously left is a deliberate rejoin.
+        HouseholdStore.unmarkZoneLeft(metadata.share.recordID.zoneID)
         await bootstrap()
     }
 
@@ -678,6 +708,13 @@ final class HouseholdStore: ObservableObject {
     /// or log — exactly what happened here. This precondition is the only real defense.
     private func removeParticipantSafely(_ participant: CKShare.Participant?, from share: CKShare, db: CKDatabase) async throws {
         guard let participant, participant.role != .owner else { return }
+        // `removeParticipant` also raises an uncatchable exception when the participant isn't
+        // actually in the share's list. Everyone joins this app through the public link
+        // (`publicPermission = .readWrite`), and a public participant is not in `participants` —
+        // so the unguarded call crashed for essentially every flatmate who tried to leave.
+        guard let identity = participant.userIdentity.userRecordID,
+              share.participants.contains(where: { $0.userIdentity.userRecordID == identity })
+        else { return }
         share.removeParticipant(participant)
         _ = try await db.modifyRecords(saving: [share], deleting: [])
     }
@@ -695,27 +732,28 @@ final class HouseholdStore: ObservableObject {
             resetLocalState()
             return nil
         }
+        // Leaving as a participant always succeeds locally. Every server-side step here is a
+        // courtesy — releasing the share, tidying our Member record — and none of it is worth
+        // trapping someone in a flat they've said they want out of. An owner is different: their
+        // zone holds the household's data, so a failure there has to be reported, not swallowed.
+        if !isOwner {
+            if let recordName = UserDefaults.standard.string(forKey: HouseholdStore.myMemberRecordKey) {
+                _ = try? await db.deleteRecord(withID: CKRecord.ID(recordName: recordName, zoneID: zoneID))
+            }
+            let householdID = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
+            if let household = try? await db.record(for: householdID),
+               let shareRef = household.share,
+               let share = try? await db.record(for: shareRef.recordID) as? CKShare {
+                try? await removeParticipantSafely(share.currentUserParticipant, from: share, db: db)
+            }
+            HouseholdStore.markZoneLeft(zoneID)
+            resetLocalState()
+            return nil
+        }
+
         do {
             if isOwner {
                 _ = try await db.deleteRecordZone(withID: zoneID)
-            } else {
-                // Best-effort: remove our Member record if we ever got one. Not fatal if this
-                // fails or there isn't one (e.g. leaving from the stuck-at-name-entry state).
-                if let recordName = UserDefaults.standard.string(forKey: HouseholdStore.myMemberRecordKey) {
-                    _ = try? await db.deleteRecord(withID: CKRecord.ID(recordName: recordName, zoneID: zoneID))
-                }
-                // A participant can't delete the owner's zone — CloudKit rightly refuses that,
-                // it would let any invited guest destroy the whole household's data. The actual
-                // way to leave is removing our own entry from the share's participant list;
-                // CloudKit specifically permits self-removal even without general write access
-                // to the share record. This is what makes it stick across relaunches — without
-                // it, bootstrap() just re-discovers the same shared zone next launch.
-                let householdID = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
-                let household = try await db.record(for: householdID)
-                if let shareRef = household.share,
-                   let share = try await db.record(for: shareRef.recordID) as? CKShare {
-                    try await removeParticipantSafely(share.currentUserParticipant, from: share, db: db)
-                }
             }
             resetLocalState()
             return nil
