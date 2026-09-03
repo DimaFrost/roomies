@@ -14,7 +14,7 @@ struct RoomiesApp: App {
                 .task { await store.bootstrap() }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active, store.phase == .ready {
-                        Task { try? await store.refreshAll() }
+                        Task { await store.syncNow() }
                     }
                 }
         }

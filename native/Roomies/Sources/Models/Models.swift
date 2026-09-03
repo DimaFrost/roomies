@@ -36,7 +36,7 @@ struct Ask: Identifiable, Codable, Equatable {
     var completedAt: Date?
 }
 
-struct HouseholdState: Equatable {
+struct HouseholdState: Codable, Equatable {
     var people: [String] = []
     var expenses: [Expense] = []
     var asks: [Ask] = []
@@ -44,7 +44,7 @@ struct HouseholdState: Equatable {
     var plans: [PlanEvent] = []
 }
 
-struct FlatInfo: Equatable {
+struct FlatInfo: Codable, Equatable {
     var name: String
     /// iCloud share URL flatmates use to join.
     var shareURL: URL?

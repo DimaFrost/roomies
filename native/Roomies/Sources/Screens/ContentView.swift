@@ -77,6 +77,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                syncBanner
                 Group {
                     switch tab {
                     case .split: ExpensesView()
@@ -93,6 +94,42 @@ struct ContentView: View {
 
             tabBar
         }
+    }
+
+    /// Sync state only ever appeared on the full-screen error view, so a write that failed
+    /// while the app was in use said nothing at all. This is where that shows up now.
+    @ViewBuilder private var syncBanner: some View {
+        if let message = syncMessage {
+            HStack(spacing: 8) {
+                Text(store.error != nil ? "⚠️" : "☁️")
+                    .font(Fonts.sans(12))
+                Text(message)
+                    .font(Fonts.mono(11))
+                    .foregroundColor(store.error != nil ? Theme.yellow : Theme.textDim)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.card)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.pillRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.pillRadius)
+                    .stroke(store.error != nil ? Theme.yellow.opacity(0.35) : Theme.cardBorder)
+            )
+            .onTapGesture { store.dismissError() }
+        }
+    }
+
+    private var syncMessage: String? {
+        if let error = store.error { return error }
+        let waiting = store.pendingWrites.count
+        if waiting > 0 {
+            return "\(waiting) change\(waiting == 1 ? "" : "s") saved on this device — will sync when iCloud is reachable"
+        }
+        if store.isStale { return "Can't reach iCloud — showing your last synced data" }
+        return nil
     }
 
     private var header: some View {

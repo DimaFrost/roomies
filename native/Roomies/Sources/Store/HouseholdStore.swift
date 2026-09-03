@@ -27,6 +27,10 @@ final class HouseholdStore: ObservableObject {
     /// "Invite a flatmate"). We present our own copy-the-link UI rather than the system share
     /// sheet — see `InviteLinkView`.
     @Published var pendingShare: CKShare?
+    /// Writes composed on this device that CloudKit hasn't accepted yet.
+    @Published private(set) var pendingWrites: [PendingWrite] = []
+    /// True when what's on screen came from the offline snapshot rather than a live fetch.
+    @Published private(set) var isStale = false
 
     private let container = CKContainer(identifier: "iCloud.com.madebyfrost.roomies")
     private var database: CKDatabase?
@@ -34,6 +38,8 @@ final class HouseholdStore: ObservableObject {
     private(set) var isOwner = false
     private var myUserRecordID: CKRecord.ID?
     private var subscriptionRegistered = false
+    /// Guards against two flushes running at once — they would race over the same queue entries.
+    private var isFlushing = false
 
     private static let householdRecordType = "Household"
     private static let memberRecordType = "Member"
@@ -48,6 +54,7 @@ final class HouseholdStore: ObservableObject {
 
     init() {
         HouseholdStore.current = self
+        pendingWrites = LocalPersistence.loadPendingWrites()
     }
 
     // MARK: - Bootstrap
@@ -55,6 +62,17 @@ final class HouseholdStore: ObservableObject {
     func bootstrap() async {
         phase = .loading
         error = nil
+
+        // Show the last known state straight away and let the fetch below catch it up. Without
+        // this, opening the app with no signal means an error screen — or worse, an indefinite
+        // blank one — with every balance already sitting on the device.
+        let hasUsableCache = restoreSnapshot()
+        if hasUsableCache {
+            isStale = true
+            phase = .ready
+        }
+        startBootstrapWatchdog()
+
         do {
             let status = try await container.accountStatus()
             guard status == .available else {
@@ -78,10 +96,21 @@ final class HouseholdStore: ObservableObject {
             }
 
             await registerSubscriptionIfNeeded()
+            // Push before pulling: a refresh that ran first would overwrite the local rows behind
+            // any queued writes with server state that doesn't contain them yet.
+            await flushPendingWrites()
             try await refreshAll()
+            isStale = false
         } catch {
-            self.error = error.localizedDescription
-            phase = .error
+            if hasUsableCache {
+                // A stale flat beats an error screen — it's readable, and new expenses queue
+                // until the connection is back.
+                isStale = true
+                phase = .ready
+            } else {
+                self.error = error.localizedDescription
+                phase = .error
+            }
         }
     }
 
@@ -263,6 +292,9 @@ final class HouseholdStore: ObservableObject {
             myName = nil
             phase = .needsName
         }
+
+        isStale = false
+        persistSnapshot()
     }
 
     /// Fetches every record in the zone directly (no CKQuery involved), so this never depends on
@@ -319,7 +351,188 @@ final class HouseholdStore: ObservableObject {
     }
 
     func handleRemoteNotification() async {
-        try? await refreshAll()
+        await syncNow()
+    }
+
+    // MARK: - Offline sync
+
+    /// A write that can't be attempted yet because the zone isn't resolved — treated as
+    /// temporary, since bootstrap will resolve it.
+    private enum SyncError: Error { case notReady }
+
+    /// `CKContainer.accountStatus()` does not reliably fail when the account is unusable — it can
+    /// sit there indefinitely refreshing authorization (reproducible on a simulator with no
+    /// iCloud account signed in), and `bootstrap` awaits it as its very first call. Without a
+    /// deadline the app shows an empty screen for as long as the user is willing to look at it.
+    private func startBootstrapWatchdog() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(12))
+            guard let self, self.phase == .loading else { return }
+            self.error = "Can't reach iCloud. Check your connection and try again."
+            self.phase = .error
+        }
+    }
+
+    func dismissError() { error = nil }
+
+    /// Pushes anything queued, then pulls. The foreground and push entry point.
+    func syncNow() async {
+        await flushPendingWrites()
+        do {
+            try await refreshAll()
+        } catch {
+            isStale = true
+        }
+    }
+
+    /// Loads the offline snapshot into live state. Returns whether there was enough to show the
+    /// flat without touching the network.
+    @discardableResult
+    private func restoreSnapshot() -> Bool {
+        guard let snapshot = LocalPersistence.loadSnapshot() else { return false }
+        state = snapshot.state
+        flat = snapshot.flat
+        myName = snapshot.myName
+        isOwner = snapshot.isOwner
+        // Restoring the zone is what lets writes still be composed and queued while offline;
+        // discovering it normally costs an `allRecordZones()` round trip.
+        zoneID = snapshot.zoneID
+        database = snapshot.isOwner ? container.privateCloudDatabase : container.sharedCloudDatabase
+        return snapshot.myName != nil && snapshot.flat != nil
+    }
+
+    private func persistSnapshot() {
+        guard let zoneID, myName != nil else { return }
+        LocalPersistence.saveSnapshot(CachedSnapshot(
+            state: state,
+            flat: flat,
+            myName: myName,
+            isOwner: isOwner,
+            zoneName: zoneID.zoneName,
+            zoneOwnerName: zoneID.ownerName,
+            savedAt: Date()
+        ))
+    }
+
+    private func enqueue(_ write: PendingWrite) {
+        if let idx = pendingWrites.firstIndex(where: { $0.id == write.id }) {
+            pendingWrites[idx] = pendingWrites[idx].merging(write)
+        } else {
+            pendingWrites.append(write)
+        }
+        LocalPersistence.savePendingWrites(pendingWrites)
+    }
+
+    /// Sends a write to CloudKit, keeping the optimistic local row either way.
+    ///
+    /// If it fails for a reason that could pass later — no signal, rate limiting, a busy zone —
+    /// the write goes on the queue rather than being thrown away. Only a permanent refusal
+    /// discards it, and then we re-read the server so the UI stops showing a row that will
+    /// never exist.
+    private func commit(_ write: PendingWrite, describing subject: String) {
+        persistSnapshot()
+        Task {
+            do {
+                try await perform(write, replaying: false)
+                persistSnapshot()
+            } catch {
+                if Self.isRetryable(error) {
+                    enqueue(write)
+                } else {
+                    self.error = "\(subject) couldn't be saved: \(error.localizedDescription)"
+                    try? await refreshAll()
+                }
+            }
+        }
+    }
+
+    private func perform(_ write: PendingWrite, replaying: Bool) async throws {
+        guard let db = database, let zoneID else { throw SyncError.notReady }
+        let recordID = CKRecord.ID(recordName: write.id, zoneID: zoneID)
+
+        switch write.kind {
+        case .delete:
+            do {
+                _ = try await db.deleteRecord(withID: recordID)
+            } catch let error as CKError where error.code == .unknownItem {
+                // Already gone, or it never reached the server. Either way there's nothing to do.
+            }
+        case .save:
+            let record: CKRecord
+            if write.isNew && !replaying {
+                record = CKRecord(recordType: write.recordType, recordID: recordID)
+            } else {
+                // Apply onto the server's current version. A replayed write is racing every other
+                // device's edits, and saving a locally-built record would fail the etag check
+                // instead of merging.
+                do {
+                    record = try await db.record(for: recordID)
+                } catch let error as CKError where error.code == .unknownItem {
+                    guard write.isNew else { throw error }
+                    record = CKRecord(recordType: write.recordType, recordID: recordID)
+                }
+            }
+            for (key, value) in write.fields { record[key] = value.recordValue }
+            _ = try await db.save(record)
+        }
+    }
+
+    /// Replays queued writes oldest-first, stopping at the first temporary failure — if the
+    /// connection is down the rest will fail identically, and stopping keeps them in order.
+    ///
+    /// The queue is mutated entry by entry rather than swapped out at the end. Taking a copy and
+    /// assigning it back would silently discard anything the user queued *during* the flush —
+    /// the same lose-the-user's-expense bug this queue exists to fix.
+    func flushPendingWrites() async {
+        guard !isFlushing, !pendingWrites.isEmpty, database != nil, zoneID != nil else { return }
+        isFlushing = true
+        defer { isFlushing = false }
+
+        var dropped = 0
+
+        while let write = pendingWrites.min(by: { $0.queuedAt < $1.queuedAt }) {
+            do {
+                try await perform(write, replaying: true)
+            } catch {
+                if Self.isRetryable(error) { break }
+                // CloudKit will never accept this one; retrying forever would just hide it.
+                dropped += 1
+            }
+
+            // Only retire the entry if it's unchanged. An edit made while the request was in
+            // flight merged into it and still needs sending.
+            guard let idx = pendingWrites.firstIndex(where: { $0.id == write.id }),
+                  pendingWrites[idx] == write else { continue }
+            pendingWrites.remove(at: idx)
+            LocalPersistence.savePendingWrites(pendingWrites)
+        }
+
+        if dropped > 0 {
+            error = dropped == 1
+                ? "One change couldn't be saved to iCloud and was discarded."
+                : "\(dropped) changes couldn't be saved to iCloud and were discarded."
+        }
+    }
+
+    /// Whether a failed write is worth keeping. Deliberately conservative: anything not listed
+    /// counts as a permanent refusal, because a write CloudKit will never accept would otherwise
+    /// sit in the queue being retried forever.
+    private static func isRetryable(_ error: Error) -> Bool {
+        if error is SyncError { return true }
+        guard let ckError = error as? CKError else {
+            return (error as NSError).domain == NSURLErrorDomain
+        }
+        switch ckError.code {
+        case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited,
+             .zoneBusy, .notAuthenticated, .accountTemporarilyUnavailable, .internalError,
+             // The next attempt fetches the server's version first, so a conflict resolves itself.
+             .serverRecordChanged:
+            return true
+        case .partialFailure:
+            return ckError.partialErrorsByItemID?.values.contains { isRetryable($0) } ?? false
+        default:
+            return false
+        }
     }
 
     // MARK: - Row <-> record mapping
@@ -408,35 +621,19 @@ final class HouseholdStore: ObservableObject {
     // MARK: - Household management
 
     func renameHousehold(_ newName: String) {
-        guard let db = database, let zoneID = zoneID else { return }
         flat?.name = newName
-        Task {
-            do {
-                let id = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
-                let record = try await db.record(for: id)
-                record["name"] = newName as CKRecordValue
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Rename didn't sync: \(error.localizedDescription)"
-            }
-        }
+        commit(.save(HouseholdStore.householdRecordType, id: HouseholdStore.householdRecordName, isNew: false, fields: [
+            "name": .string(newName)
+        ]), describing: "The new flat name")
     }
 
     func saveRentSettings(amount: Double?, dueDay: Int?) {
-        guard let db = database, let zoneID = zoneID else { return }
         flat?.rentAmount = amount
         flat?.rentDueDay = dueDay
-        Task {
-            do {
-                let id = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
-                let record = try await db.record(for: id)
-                record["rentAmount"] = amount as? CKRecordValue
-                record["rentDueDay"] = dueDay as? CKRecordValue
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Rent settings didn't sync: \(error.localizedDescription)"
-            }
-        }
+        commit(.save(HouseholdStore.householdRecordType, id: HouseholdStore.householdRecordName, isNew: false, fields: [
+            "rentAmount": .double(amount),
+            "rentDueDay": .int(dueDay)
+        ]), describing: "The rent settings")
     }
 
     /// Removes a flatmate from the household. Their expenses and asks are left intact so the
@@ -534,6 +731,11 @@ final class HouseholdStore: ObservableObject {
         flat = nil
         myName = nil
         state = HouseholdState()
+        isStale = false
+        // Drop the cache and any unsent writes too, so the next household never inherits the
+        // previous one's rows.
+        pendingWrites = []
+        LocalPersistence.clear()
         UserDefaults.standard.removeObject(forKey: HouseholdStore.myMemberRecordKey)
         phase = .needsHousehold
     }
@@ -605,78 +807,54 @@ final class HouseholdStore: ObservableObject {
     // MARK: - Writes: bills
 
     func addBill(title: String, amount: Double, dueDay: Int, paidBy: String?) {
-        guard let db = database, let zoneID = zoneID else { return }
         let id = makeId()
         let createdAt = Date()
         state.bills.append(Bill(id: id, title: title, amount: amount, dueDay: dueDay, paidBy: paidBy, createdAt: createdAt))
         state.bills.sort { $0.dueDay < $1.dueDay }
 
-        let record = CKRecord(recordType: HouseholdStore.billRecordType, recordID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        record["title"] = title as CKRecordValue
-        record["amount"] = amount as CKRecordValue
-        record["dueDay"] = dueDay as CKRecordValue
-        if let paidBy { record["paidBy"] = paidBy as CKRecordValue }
-        record["createdAt"] = createdAt as CKRecordValue
-
-        Task {
-            do {
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Bill didn't sync: \(error.localizedDescription)"
-                state.bills.removeAll { $0.id == id }
-            }
-        }
+        commit(.save(HouseholdStore.billRecordType, id: id, isNew: true, fields: [
+            "title": .string(title),
+            "amount": .double(amount),
+            "dueDay": .int(dueDay),
+            "paidBy": .string(paidBy),
+            "createdAt": .date(createdAt)
+        ]), describing: "That bill")
     }
 
     func deleteBill(id: String) {
-        guard let db = database, let zoneID = zoneID else { return }
         state.bills.removeAll { $0.id == id }
-        Task {
-            _ = try? await db.deleteRecord(withID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        }
+        commit(.delete(HouseholdStore.billRecordType, id: id), describing: "That deleted bill")
     }
 
     // MARK: - Writes: plans
 
     func addPlan(title: String?, start: Date, end: Date, isAllDay: Bool, invitees: [String]) {
-        guard let db = database, let zoneID = zoneID, let owner = myName else { return }
+        guard let owner = myName else { return }
         let id = makeId()
         let createdAt = Date()
         state.plans.append(PlanEvent(id: id, owner: owner, title: title, start: start, end: end, isAllDay: isAllDay, isManual: true, invitees: invitees, externalID: nil, createdAt: createdAt))
         state.plans.sort { $0.start < $1.start }
 
-        let record = CKRecord(recordType: HouseholdStore.planRecordType, recordID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        record["owner"] = owner as CKRecordValue
-        if let title { record["title"] = title as CKRecordValue }
-        record["start"] = start as CKRecordValue
-        record["end"] = end as CKRecordValue
-        record["isAllDay"] = (isAllDay ? 1 : 0) as CKRecordValue
-        record["isManual"] = 1 as CKRecordValue
-        if !invitees.isEmpty { record["invitees"] = invitees as CKRecordValue }
-        record["createdAt"] = createdAt as CKRecordValue
-
-        Task {
-            do {
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Plan didn't sync: \(error.localizedDescription)"
-                state.plans.removeAll { $0.id == id }
-            }
-        }
+        commit(.save(HouseholdStore.planRecordType, id: id, isNew: true, fields: [
+            "owner": .string(owner),
+            "title": .string(title),
+            "start": .date(start),
+            "end": .date(end),
+            "isAllDay": .bool(isAllDay),
+            "isManual": .bool(true),
+            "invitees": .stringList(invitees),
+            "createdAt": .date(createdAt)
+        ]), describing: "That plan")
     }
 
     func deletePlan(id: String) {
-        guard let db = database, let zoneID = zoneID else { return }
         state.plans.removeAll { $0.id == id }
-        Task {
-            _ = try? await db.deleteRecord(withID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        }
+        commit(.delete(HouseholdStore.planRecordType, id: id), describing: "That deleted plan")
     }
 
     /// Owner-only, and manual plans only — a calendar-imported block gets overwritten by the
     /// next sync anyway, so hand-editing it would just be undone.
     func updatePlan(id: String, title: String?, start: Date, end: Date, invitees: [String]) {
-        guard let db = database, let zoneID = zoneID else { return }
         if let idx = state.plans.firstIndex(where: { $0.id == id }) {
             state.plans[idx].title = title
             state.plans[idx].start = start
@@ -684,19 +862,12 @@ final class HouseholdStore: ObservableObject {
             state.plans[idx].invitees = invitees
             state.plans.sort { $0.start < $1.start }
         }
-        Task {
-            do {
-                let record = try await db.record(for: CKRecord.ID(recordName: id, zoneID: zoneID))
-                record["title"] = title.map { $0 as CKRecordValue }
-                record["start"] = start as CKRecordValue
-                record["end"] = end as CKRecordValue
-                record["invitees"] = invitees.isEmpty ? nil : (invitees as CKRecordValue)
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Edit didn't sync: \(error.localizedDescription)"
-                try? await refreshAll()
-            }
-        }
+        commit(.save(HouseholdStore.planRecordType, id: id, isNew: false, fields: [
+            "title": .string(title),
+            "start": .date(start),
+            "end": .date(end),
+            "invitees": .stringList(invitees)
+        ]), describing: "That plan edit")
     }
 
     /// Publishes busy blocks imported from this device's calendar.
@@ -745,47 +916,30 @@ final class HouseholdStore: ObservableObject {
     // MARK: - Writes: expenses
 
     func addExpense(description: String, amount: Double, category: String, paidBy: String, split: SplitType, forPerson: String?, date: Date = Date()) {
-        guard let db = database, let zoneID = zoneID else { return }
         let id = makeId()
         let createdAt = date
         let full = Expense(id: id, description: description, amount: amount, category: category, paidBy: paidBy, split: split, forPerson: forPerson, createdAt: createdAt)
         state.expenses.insert(full, at: 0)
 
-        let record = CKRecord(recordType: HouseholdStore.expenseRecordType, recordID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        record["desc"] = description as CKRecordValue
-        record["amount"] = amount as CKRecordValue
-        record["category"] = category as CKRecordValue
-        record["paidBy"] = paidBy as CKRecordValue
-        record["split"] = split.rawValue as CKRecordValue
-        if let forPerson { record["forPerson"] = forPerson as CKRecordValue }
-        record["createdAt"] = createdAt as CKRecordValue
-
-        Task {
-            do {
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Expense didn't sync: \(error.localizedDescription)"
-                state.expenses.removeAll { $0.id == id }
-            }
-        }
+        commit(.save(HouseholdStore.expenseRecordType, id: id, isNew: true, fields: [
+            "desc": .string(description),
+            "amount": .double(amount),
+            "category": .string(category),
+            "paidBy": .string(paidBy),
+            "split": .string(split.rawValue),
+            "forPerson": .string(forPerson),
+            "createdAt": .date(createdAt)
+        ]), describing: "That expense")
     }
 
     func deleteExpense(id: String) {
-        guard let db = database, let zoneID = zoneID else { return }
         state.expenses.removeAll { $0.id == id }
-        Task {
-            do {
-                _ = try await db.deleteRecord(withID: CKRecord.ID(recordName: id, zoneID: zoneID))
-            } catch {
-                self.error = "Delete didn't sync: \(error.localizedDescription)"
-            }
-        }
+        commit(.delete(HouseholdStore.expenseRecordType, id: id), describing: "That deleted expense")
     }
 
     /// paidBy is fixed on edit — it's also the edit permission gate, and reassigning who paid
     /// after the fact is more likely a mistake than an intent.
     func updateExpense(id: String, description: String, amount: Double, category: String, split: SplitType, forPerson: String?, date: Date) {
-        guard let db = database, let zoneID = zoneID else { return }
         if let idx = state.expenses.firstIndex(where: { $0.id == id }) {
             state.expenses[idx].description = description
             state.expenses[idx].amount = amount
@@ -795,21 +949,14 @@ final class HouseholdStore: ObservableObject {
             state.expenses[idx].createdAt = date
             state.expenses.sort { $0.createdAt > $1.createdAt }
         }
-        Task {
-            do {
-                let record = try await db.record(for: CKRecord.ID(recordName: id, zoneID: zoneID))
-                record["desc"] = description as CKRecordValue
-                record["amount"] = amount as CKRecordValue
-                record["category"] = category as CKRecordValue
-                record["split"] = split.rawValue as CKRecordValue
-                record["forPerson"] = forPerson.map { $0 as CKRecordValue }
-                record["createdAt"] = date as CKRecordValue
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Edit didn't sync: \(error.localizedDescription)"
-                try? await refreshAll()
-            }
-        }
+        commit(.save(HouseholdStore.expenseRecordType, id: id, isNew: false, fields: [
+            "desc": .string(description),
+            "amount": .double(amount),
+            "category": .string(category),
+            "split": .string(split.rawValue),
+            "forPerson": .string(forPerson),
+            "createdAt": .date(date)
+        ]), describing: "That expense edit")
     }
 
     func recordSettlement(from: String, to: String, amount: Double) {
@@ -819,80 +966,54 @@ final class HouseholdStore: ObservableObject {
     // MARK: - Writes: asks
 
     func addAsk(title: String, note: String?, askedBy: String, assignedTo: String?) {
-        guard let db = database, let zoneID = zoneID else { return }
         let id = makeId()
         let createdAt = Date()
         let full = Ask(id: id, title: title, note: note, askedBy: askedBy, assignedTo: assignedTo, status: .open, acceptedBy: nil, createdAt: createdAt, completedAt: nil)
         state.asks.insert(full, at: 0)
 
-        let record = CKRecord(recordType: HouseholdStore.askRecordType, recordID: CKRecord.ID(recordName: id, zoneID: zoneID))
-        record["title"] = title as CKRecordValue
-        if let note { record["note"] = note as CKRecordValue }
-        record["askedBy"] = askedBy as CKRecordValue
-        if let assignedTo { record["assignedTo"] = assignedTo as CKRecordValue }
-        record["status"] = AskStatus.open.rawValue as CKRecordValue
-        record["createdAt"] = createdAt as CKRecordValue
-
-        Task {
-            do {
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Ask didn't sync: \(error.localizedDescription)"
-                state.asks.removeAll { $0.id == id }
-            }
-        }
+        commit(.save(HouseholdStore.askRecordType, id: id, isNew: true, fields: [
+            "title": .string(title),
+            "note": .string(note),
+            "askedBy": .string(askedBy),
+            "assignedTo": .string(assignedTo),
+            "status": .string(AskStatus.open.rawValue),
+            "createdAt": .date(createdAt)
+        ]), describing: "That ask")
     }
 
-    private func patchAsk(id: String, apply: @escaping (inout Ask) -> Void, recordPatch: @escaping (CKRecord) -> Void) {
-        guard let db = database, let zoneID = zoneID else { return }
+    private func patchAsk(id: String, apply: (inout Ask) -> Void, fields: [String: FieldValue]) {
         if let idx = state.asks.firstIndex(where: { $0.id == id }) {
             apply(&state.asks[idx])
         }
-        Task {
-            do {
-                let recordID = CKRecord.ID(recordName: id, zoneID: zoneID)
-                let record = try await db.record(for: recordID)
-                recordPatch(record)
-                _ = try await db.save(record)
-            } catch {
-                self.error = "Update didn't sync: \(error.localizedDescription)"
-            }
-        }
+        commit(.save(HouseholdStore.askRecordType, id: id, isNew: false, fields: fields), describing: "That ask update")
     }
 
     /// askedBy is fixed on edit — it's the edit permission gate.
     func updateAsk(id: String, title: String, note: String?, assignedTo: String?) {
-        patchAsk(id: id, apply: { $0.title = title; $0.note = note; $0.assignedTo = assignedTo }, recordPatch: { r in
-            r["title"] = title as CKRecordValue
-            r["note"] = note.map { $0 as CKRecordValue }
-            r["assignedTo"] = assignedTo.map { $0 as CKRecordValue }
-        })
+        patchAsk(id: id, apply: { $0.title = title; $0.note = note; $0.assignedTo = assignedTo }, fields: [
+            "title": .string(title),
+            "note": .string(note),
+            "assignedTo": .string(assignedTo)
+        ])
     }
 
     func acceptAsk(id: String, by: String) {
-        patchAsk(id: id, apply: { $0.status = .accepted; $0.acceptedBy = by }, recordPatch: { r in
-            r["status"] = AskStatus.accepted.rawValue as CKRecordValue
-            r["acceptedBy"] = by as CKRecordValue
-        })
+        patchAsk(id: id, apply: { $0.status = .accepted; $0.acceptedBy = by }, fields: [
+            "status": .string(AskStatus.accepted.rawValue),
+            "acceptedBy": .string(by)
+        ])
     }
 
     func completeAsk(id: String) {
         let completedAt = Date()
-        patchAsk(id: id, apply: { $0.status = .done; $0.completedAt = completedAt }, recordPatch: { r in
-            r["status"] = AskStatus.done.rawValue as CKRecordValue
-            r["completedAt"] = completedAt as CKRecordValue
-        })
+        patchAsk(id: id, apply: { $0.status = .done; $0.completedAt = completedAt }, fields: [
+            "status": .string(AskStatus.done.rawValue),
+            "completedAt": .date(completedAt)
+        ])
     }
 
     func deleteAsk(id: String) {
-        guard let db = database, let zoneID = zoneID else { return }
         state.asks.removeAll { $0.id == id }
-        Task {
-            do {
-                _ = try await db.deleteRecord(withID: CKRecord.ID(recordName: id, zoneID: zoneID))
-            } catch {
-                self.error = "Delete didn't sync: \(error.localizedDescription)"
-            }
-        }
+        commit(.delete(HouseholdStore.askRecordType, id: id), describing: "That deleted ask")
     }
 }
