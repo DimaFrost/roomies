@@ -169,14 +169,13 @@ final class HouseholdStore: ObservableObject {
 
             let share = CKShare(rootRecord: household)
             share[CKShare.SystemFieldKey.title] = flatName as CKRecordValue
-            // .readWrite because whoever has the link *is* the invite — there's no separate
-            // per-participant permission step anymore now that we accept shares ourselves via
-            // shareMetadata(for:)/accept(_:) instead of UICloudSharingController's own UI (which
-            // used to grant write access through its own flow regardless of this property).
-            // Leaving this at .none — the default before that removal — silently limited every
-            // link-based joiner to no write access, so their first save (their own Member
-            // record) failed with "Create operation not permitted."
-            share.publicPermission = .readWrite
+            // Closed by default: the link is an address, not a key. Access comes from being an
+            // explicit participant, added by iCloud identity in `inviteFlatmate`. With
+            // `.readWrite` here the URL itself granted full access to anyone holding it —
+            // permanently, and to anyone they forwarded it to — which made single-use invites
+            // impossible and `removeMember` cosmetic, since an evicted flatmate just used the
+            // old link again.
+            share.publicPermission = .none
 
             let memberID = CKRecord.ID(recordName: makeId(), zoneID: zoneID)
             let member = CKRecord(recordType: HouseholdStore.memberRecordType, recordID: memberID)
@@ -785,15 +784,8 @@ final class HouseholdStore: ObservableObject {
             let householdID = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
             let household = try await db.record(for: householdID)
 
-            // Re-open the live share if there is one — self-healing the permission if this
-            // share predates the .readWrite fix, so an old broken invite gets fixed by simply
-            // opening it again rather than needing Stop Sharing + a whole new link.
             if let shareRef = household.share,
                let existingShare = try? await db.record(for: shareRef.recordID) as? CKShare {
-                if existingShare.publicPermission != .readWrite {
-                    existingShare.publicPermission = .readWrite
-                    _ = try? await db.modifyRecords(saving: [existingShare], deleting: [])
-                }
                 pendingShare = existingShare
                 return
             }
@@ -802,18 +794,122 @@ final class HouseholdStore: ObservableObject {
             // (which permanently kills it; old links can't be revived, only replaced).
             let share = CKShare(rootRecord: household)
             share[CKShare.SystemFieldKey.title] = (flat?.name ?? (household["name"] as? String) ?? "Our flat") as CKRecordValue
-            // .readWrite because whoever has the link *is* the invite — there's no separate
-            // per-participant permission step anymore now that we accept shares ourselves via
-            // shareMetadata(for:)/accept(_:) instead of UICloudSharingController's own UI (which
-            // used to grant write access through its own flow regardless of this property).
-            // Leaving this at .none — the default before that removal — silently limited every
-            // link-based joiner to no write access, so their first save (their own Member
-            // record) failed with "Create operation not permitted."
-            share.publicPermission = .readWrite
+            // Closed by default: the link is an address, not a key. Access comes from being an
+            // explicit participant, added by iCloud identity in `inviteFlatmate`. With
+            // `.readWrite` here the URL itself granted full access to anyone holding it —
+            // permanently, and to anyone they forwarded it to — which made single-use invites
+            // impossible and `removeMember` cosmetic, since an evicted flatmate just used the
+            // old link again.
+            share.publicPermission = .none
             _ = try await db.modifyRecords(saving: [household, share], deleting: [])
             pendingShare = share
         } catch {
             self.error = "Couldn't open the invite: \(error.localizedDescription)"
+        }
+    }
+
+    /// Flatmates who are in the flat *only* because the link is open, and would therefore lose
+    /// access the moment it closes.
+    ///
+    /// Someone who accepted an open link joins as a `.publicUser`, and that role's access comes
+    /// from `publicPermission` rather than from being named on the share. CloudKit offers no way
+    /// to promote them in place, so closing the link around them would silently evict people
+    /// from a household they're already living in. Their names are surfaced instead, and the
+    /// link stays open until the owner decides.
+    func strandedByClosing(_ share: CKShare) -> [String] {
+        share.participants
+            .filter { $0.role == .publicUser }
+            .compactMap { participant in
+                let name = participant.userIdentity.nameComponents
+                    .map { PersonNameComponentsFormatter().string(from: $0) }
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                return name ?? participant.userIdentity.lookupInfo?.emailAddress ?? "a flatmate"
+            }
+    }
+
+    /// Names of everyone still relying on the open link, for the flat's owner to act on.
+    var flatmatesOnOpenLink: [String] {
+        guard let share = pendingShare else { return [] }
+        return strandedByClosing(share)
+    }
+
+    /// Invites one person by their iCloud identity, so the link works only for them.
+    ///
+    /// This is what makes an invite single-use: CloudKit binds access to the account behind the
+    /// email or phone number, so forwarding the URL gets the next person nothing, and removing
+    /// them later actually revokes it.
+    func inviteFlatmate(contact rawContact: String) async -> String? {
+        guard isOwner else { return "Only the person who created the flat can invite flatmates." }
+        guard let db = database, let zoneID else { return "Still connecting to iCloud — try again in a moment." }
+        let contact = rawContact.trimmed
+        guard !contact.isEmpty else { return "Enter their email address or phone number." }
+
+        do {
+            let householdID = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
+            let household = try await db.record(for: householdID)
+
+            let share: CKShare
+            if let shareRef = household.share,
+               let existing = try? await db.record(for: shareRef.recordID) as? CKShare {
+                share = existing
+            } else {
+                let fresh = CKShare(rootRecord: household)
+                fresh[CKShare.SystemFieldKey.title] = (flat?.name ?? "Our flat") as CKRecordValue
+                fresh.publicPermission = .none
+                _ = try await db.modifyRecords(saving: [household, fresh], deleting: [])
+                share = fresh
+            }
+
+            let participant: CKShare.Participant
+            do {
+                participant = contact.contains("@")
+                    ? try await container.shareParticipant(forEmailAddress: contact)
+                    : try await container.shareParticipant(forPhoneNumber: contact)
+            } catch {
+                return "No iCloud account uses \(contact). Ask them which address or number their Apple Account is under — it has to be one Apple can find them by."
+            }
+
+            // `addParticipant` raises an uncatchable exception on someone already on the share,
+            // so an accidental second invite has to be caught here rather than trapped.
+            if let existingID = participant.userIdentity.userRecordID,
+               share.participants.contains(where: { $0.userIdentity.userRecordID == existingID }) {
+                pendingShare = share
+                return nil
+            }
+
+            participant.permission = .readWrite
+            share.addParticipant(participant)
+            // Deliberately does *not* close an already-open link. Someone the owner sent it to
+            // who hasn't accepted yet is invisible here — `share.participants` only lists people
+            // who already joined — so closing it as a side effect would break an invite that's
+            // still in flight. Flats created from now on start closed; an existing one is closed
+            // only when the owner says so, via `closeOpenInviteLink`.
+            _ = try await db.modifyRecords(saving: [share], deleting: [])
+            pendingShare = share
+            return nil
+        } catch {
+            return "Couldn't send that invite: \(error.localizedDescription)"
+        }
+    }
+
+    /// Closes an already-open invite link, accepting that anyone still on it has to be
+    /// re-invited by name. Owner's call, never automatic.
+    func closeOpenInviteLink() async -> String? {
+        guard isOwner, let db = database, let zoneID else { return "Only the flat's owner can do that." }
+        do {
+            let householdID = CKRecord.ID(recordName: HouseholdStore.householdRecordName, zoneID: zoneID)
+            let household = try await db.record(for: householdID)
+            guard let shareRef = household.share,
+                  let share = try? await db.record(for: shareRef.recordID) as? CKShare else {
+                return "There's no invite link to close."
+            }
+            share.publicPermission = .none
+            _ = try await db.modifyRecords(saving: [share], deleting: [])
+            pendingShare = share
+            try? await refreshAll()
+            return nil
+        } catch {
+            return "Couldn't close the link: \(error.localizedDescription)"
         }
     }
 
@@ -837,6 +933,14 @@ final class HouseholdStore: ObservableObject {
             _ = try await container.accept(metadata)
             await handleAcceptedShare(metadata: metadata)
             return nil
+        } catch let error as CKError where
+                    error.code == .participantMayNeedVerification
+                    || error.code == .permissionFailure
+                    || error.code == .unknownItem {
+            // Invites are now bound to the iCloud account they were sent to, so a link that
+            // reached the wrong account — forwarded, or sent to a different address than the one
+            // this device signs in with — fails here rather than letting anyone in.
+            return "This invite wasn't sent to your iCloud account. Ask them to invite the email address or phone number your Apple Account uses."
         } catch {
             return "Couldn't join: \(error.localizedDescription)"
         }

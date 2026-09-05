@@ -35,9 +35,10 @@ Native Swift/SwiftUI, iOS only. Sync is [CloudKit](https://developer.apple.com/i
 - Recurring bills (internet, electricity…) with due days
 
 ### ☁️ Sync
-- First launch: create a flat, then send the iCloud share link — tapping it joins them, no codes or accounts
+- First launch: create a flat, then invite a flatmate by the email or phone their Apple Account uses
 - Everything syncs between devices through a shared CloudKit record zone
 - Access control is iCloud's: only share participants can read or write the zone
+- Writes that can't reach iCloud are queued on disk and replayed, and the last synced state is cached so the app opens and works offline
 
 ## Getting started
 
@@ -65,6 +66,22 @@ xcrun devicectl device install app --device <DEVICE_UDID> <path-to>/Roomies.app
 ```
 
 **Do not edit the project in Xcode's file/build-settings UI** — `project.yml` is the source of truth and `xcodegen generate` overwrites the `.xcodeproj`.
+
+### ⚠️ Invites are bound to an Apple Account, not to the link
+
+`share.publicPermission` is `.none` on flats created from now on. The invite URL is an address,
+not a key: access comes from being an explicit participant, added via
+`CKContainer.shareParticipant(forEmailAddress:)` / `forPhoneNumber:` in
+`HouseholdStore.inviteFlatmate`. Forwarding the link gets the next person nothing, and
+`removeMember` genuinely revokes.
+
+Flats created **before** this change still have `publicPermission = .readWrite`, where the link
+alone grants full access forever. Those are not migrated automatically, and deliberately so:
+anyone who joined through an open link is a `.publicUser` whose access derives from that setting,
+CloudKit offers no way to promote them in place, and someone who was sent the link but hasn't
+accepted yet doesn't appear in `share.participants` at all. Closing the link around either group
+locks them out. The owner gets the names of anyone affected plus an explicit "Close the old link"
+action in `InviteLinkView`; nothing closes on its own.
 
 ### ⚠️ CloudKit schema gotcha (read this before shipping)
 
@@ -115,6 +132,7 @@ native/
 - **Calendar sync is manual** (a "Sync availability" button), not background
 - **Names must be unique** within a household — the balance math keys off name strings, and duplicate members are merged on refresh
 - Sync is a full zone re-fetch on launch/foreground/push rather than `CKSyncEngine` incremental sync — fine at household data volumes
+- **Pre-existing flats still have an open invite link** until their owner closes it — see the invites section above
 
 ## Roadmap
 
