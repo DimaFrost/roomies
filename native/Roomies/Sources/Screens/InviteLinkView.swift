@@ -42,6 +42,7 @@ struct InviteLinkView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .keyboardDismissable()
     }
 
     private var inviteCard: some View {

@@ -45,6 +45,7 @@ struct ContentView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .keyboardDismissable()
     }
 
     private var errorView: some View {

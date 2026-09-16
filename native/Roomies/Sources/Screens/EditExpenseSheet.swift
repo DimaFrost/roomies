@@ -96,6 +96,7 @@ struct EditExpenseSheet: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .keyboardDismissable()
     }
 
     private func splitOption(title: String, color: Color, active: Bool, action: @escaping () -> Void) -> some View {

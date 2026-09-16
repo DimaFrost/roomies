@@ -70,6 +70,7 @@ struct EditPlanSheet: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .keyboardDismissable()
     }
 
     private func save() {

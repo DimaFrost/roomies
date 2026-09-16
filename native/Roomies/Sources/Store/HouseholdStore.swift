@@ -78,7 +78,15 @@ final class HouseholdStore: ObservableObject {
             let status = try await container.accountStatus()
             guard status == .available else {
                 error = "Sign in to iCloud in Settings to sync your flat."
-                phase = .error
+                // Being signed out is no more reason to hide the flat than being offline is.
+                // The data is on the device either way; what's missing is the ability to sync
+                // it, which the banner says.
+                if hasUsableCache {
+                    isStale = true
+                    phase = .ready
+                } else {
+                    phase = .error
+                }
                 return
             }
             myUserRecordID = try await container.userRecordID()

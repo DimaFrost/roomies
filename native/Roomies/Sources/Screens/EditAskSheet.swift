@@ -62,6 +62,7 @@ struct EditAskSheet: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .keyboardDismissable()
     }
 
     private func save() {

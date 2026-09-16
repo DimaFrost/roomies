@@ -12,6 +12,7 @@ struct RoomiesApp: App {
                 .environmentObject(store)
                 .preferredColorScheme(.dark)
                 .task { await store.bootstrap() }
+                .task { KeyboardDismissGesture.shared.install() }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active, store.phase == .ready {
                         Task { await store.syncNow() }
