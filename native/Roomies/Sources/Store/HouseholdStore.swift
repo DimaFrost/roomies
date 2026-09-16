@@ -930,17 +930,47 @@ final class HouseholdStore: ObservableObject {
 
         do {
             let metadata = try await container.shareMetadata(for: url)
-            _ = try await container.accept(metadata)
+
+            // Pasting a link is an explicit request to be in this flat, so it always lifts a
+            // previous "I left this one" mark — and it has to happen before anything that can
+            // fail. Clearing it only after a successful `accept` meant that if you were already
+            // a participant (where `accept` errors, having nothing to do), the mark survived,
+            // zone discovery kept skipping the flat, and you were locked out of a household you
+            // still had access to, with no way back in.
+            HouseholdStore.unmarkZoneLeft(metadata.share.recordID.zoneID)
+
+            if metadata.participantRole == .owner {
+                // Your own flat, opened from a second device on the same Apple Account. CloudKit
+                // refuses to let an owner accept their own share, and there's nothing to accept:
+                // the zone is in this account's private database already, so a plain bootstrap
+                // picks it up.
+                await bootstrap()
+                return phase == .error ? "This is your own flat's link, but iCloud isn't reachable right now." : nil
+            }
+
+            // Judge success by whether we end up in the flat, not by what `accept` returns.
+            // Accepting a share we already participate in is an error with nothing wrong behind
+            // it, and its codes overlap with those for a genuine refusal.
+            var acceptFailure: Error?
+            do {
+                _ = try await container.accept(metadata)
+            } catch {
+                acceptFailure = error
+            }
+
             await handleAcceptedShare(metadata: metadata)
-            return nil
-        } catch let error as CKError where
-                    error.code == .participantMayNeedVerification
-                    || error.code == .permissionFailure
-                    || error.code == .unknownItem {
-            // Invites are now bound to the iCloud account they were sent to, so a link that
-            // reached the wrong account — forwarded, or sent to a different address than the one
-            // this device signs in with — fails here rather than letting anyone in.
-            return "This invite wasn't sent to your iCloud account. Ask them to invite the email address or phone number your Apple Account uses."
+            if phase == .ready || phase == .needsName { return nil }
+
+            if let ckError = acceptFailure as? CKError,
+               ckError.code == .participantMayNeedVerification
+                || ckError.code == .permissionFailure
+                || ckError.code == .unknownItem {
+                // Invites are bound to the account they were sent to, so a link that reached the
+                // wrong one fails here rather than letting anyone in.
+                return "This invite wasn't sent to your iCloud account. Ask them to invite the email address or phone number your Apple Account uses."
+            }
+            if let acceptFailure { return "Couldn't join: \(acceptFailure.localizedDescription)" }
+            return "Couldn't open that flat. Ask them to send the link again."
         } catch {
             return "Couldn't join: \(error.localizedDescription)"
         }
