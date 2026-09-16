@@ -127,6 +127,23 @@ final class HouseholdStore: ObservableObject {
         })?.zoneID
     }
 
+    /// Links a record into the flat's shared hierarchy.
+    ///
+    /// The household is shared with `CKShare(rootRecord:)`, so what a participant may touch is
+    /// defined by parent references reaching the root record — not by the zone they happen to
+    /// sit in. An unparented record isn't part of the share at all, which is why a flatmate
+    /// creating one got "CREATE operation not permitted" while still being able to read the
+    /// flat's name. `publicPermission = .readWrite` used to hide this by granting zone-wide
+    /// access to anyone with the link; it was never the right fix.
+    ///
+    /// `parent` is a system field, so this needs no CloudKit schema deployment.
+    private static func householdParent(in zoneID: CKRecordZone.ID) -> CKRecord.Reference {
+        CKRecord.Reference(
+            recordID: CKRecord.ID(recordName: householdRecordName, zoneID: zoneID),
+            action: .none
+        )
+    }
+
     private static func zoneKey(_ id: CKRecordZone.ID) -> String {
         "\(id.zoneName)|\(id.ownerName)"
     }
@@ -180,6 +197,7 @@ final class HouseholdStore: ObservableObject {
             let memberID = CKRecord.ID(recordName: makeId(), zoneID: zoneID)
             let member = CKRecord(recordType: HouseholdStore.memberRecordType, recordID: memberID)
             member["name"] = memberName as CKRecordValue
+            member.parent = HouseholdStore.householdParent(in: zoneID)
 
             _ = try await db.modifyRecords(saving: [household, share, member], deleting: [])
             UserDefaults.standard.set(memberID.recordName, forKey: HouseholdStore.myMemberRecordKey)
@@ -208,6 +226,7 @@ final class HouseholdStore: ObservableObject {
             let memberID = CKRecord.ID(recordName: makeId(), zoneID: zoneID)
             let member = CKRecord(recordType: HouseholdStore.memberRecordType, recordID: memberID)
             member["name"] = memberName as CKRecordValue
+            member.parent = HouseholdStore.householdParent(in: zoneID)
             _ = try await db.save(member)
             UserDefaults.standard.set(memberID.recordName, forKey: HouseholdStore.myMemberRecordKey)
             try await refreshAll()
@@ -298,6 +317,27 @@ final class HouseholdStore: ObservableObject {
             Task { [weak self] in
                 _ = try? await db.modifyRecords(saving: [], deleting: ids)
                 _ = self
+            }
+        }
+
+        // Flats predating parented records have a zone full of records that aren't in the share,
+        // so a flatmate can neither see nor edit any of the history. Only the owner can repair
+        // that — for everyone else those records are, by definition, not writable.
+        if isOwner {
+            let repairable = [memberRecs, expenseRecs, askRecs, billRecs, planRecs]
+                .flatMap { $0 }
+                .filter { $0.parent == nil }
+            if !repairable.isEmpty {
+                let parent = HouseholdStore.householdParent(in: zoneID)
+                for record in repairable { record.parent = parent }
+                Task { [weak self] in
+                    for chunk in stride(from: 0, to: repairable.count, by: 200).map({
+                        Array(repairable[$0..<min($0 + 200, repairable.count)])
+                    }) {
+                        _ = try? await db.modifyRecords(saving: chunk, deleting: [], savePolicy: .changedKeys)
+                    }
+                    _ = self
+                }
             }
         }
 
@@ -502,6 +542,10 @@ final class HouseholdStore: ObservableObject {
                 }
             }
             for (key, value) in write.fields { record[key] = value.recordValue }
+            // Root record excepted — nothing can be its own parent.
+            if record.recordID.recordName != HouseholdStore.householdRecordName {
+                record.parent = HouseholdStore.householdParent(in: zoneID)
+            }
             _ = try await db.save(record)
         }
     }
@@ -1068,6 +1112,7 @@ final class HouseholdStore: ObservableObject {
             record["isManual"] = 0 as CKRecordValue
             record["externalID"] = block.externalID as CKRecordValue
             record["createdAt"] = Date() as CKRecordValue
+            record.parent = HouseholdStore.householdParent(in: zoneID)
             toSave.append(record)
         }
 

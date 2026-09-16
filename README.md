@@ -83,6 +83,22 @@ accepted yet doesn't appear in `share.participants` at all. Closing the link aro
 locks them out. The owner gets the names of anyone affected plus an explicit "Close the old link"
 action in `InviteLinkView`; nothing closes on its own.
 
+### ⚠️ Every record needs a `parent`, or flatmates can't write
+
+The household is shared with `CKShare(rootRecord:)`, which is a *hierarchical* share: what a
+participant may read and write is whatever reaches the root record through `parent` references,
+not whatever happens to sit in the zone. A record created without a parent is not in the share,
+so a flatmate saving one gets `CREATE operation not permitted` — even while they can still read
+the flat's name, since the root record itself is shared.
+
+`HouseholdStore.householdParent(in:)` builds the reference; every create sets it. `parent` is a
+system field, so this needs no schema deployment.
+
+This was masked for a long time by `publicPermission = .readWrite`, which granted zone-wide
+access to anyone holding the link and made unparented records work by accident. Closing that hole
+exposed the real defect. Owners' apps repair pre-existing unparented records automatically on
+refresh — a participant cannot, since those records aren't writable by them by definition.
+
 ### ⚠️ CloudKit schema gotcha (read this before shipping)
 
 CloudKit has two environments, and they behave differently:
